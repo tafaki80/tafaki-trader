@@ -1,22 +1,22 @@
-"""
-TAFAKI TRADER — Web App Backend
-Flask + Yahoo Finance + Technical Analysis
-"""
-
+"""TAFAKI TRADER v2.0 — Web App | Flask + yfinance"""
 import os, math, warnings
 from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify, render_template_string
-from flask_cors import CORS
 import yfinance as yf
 import pandas as pd
 import ta
+from flask import Flask, jsonify, render_template_string, request
+from flask_cors import CORS
 
 warnings.filterwarnings("ignore")
-
 app = Flask(__name__)
 CORS(app)
 
-# ── Indikator ────────────────────────────────────────────
+# ── WIB Timezone (UTC+7) ─────────────────────────────────
+WIB = timezone(timedelta(hours=7))
+def wib_now():
+    return datetime.now(timezone.utc).astimezone(WIB)
+
+
 def add_indicators(df):
     df = df.copy()
     df["ema9"]     = df["close"].ewm(span=9,  adjust=False).mean()
@@ -194,43 +194,69 @@ def api_sesi():
     return jsonify({"status": status, "label": label, "color": color,
                     "time": now.strftime("%H:%M:%S WIB")})
 
-@app.route("/api/screen")
-def api_screen():
-    from flask import request as req
-    tickers = req.args.get("t", ",".join([
-        "BBCA","BBRI","BMRI","BBNI","TLKM","GOTO","UNVR",
-        "ADRO","PTBA","ANTM","INDF","ICBP","BRIS","ASII"
-    ])).split(",")
-    out = []
-    for t in tickers[:15]:
-        tk = t.strip().upper()
-        if not tk.endswith(".JK"): tk += ".JK"
-        df = yf.download(tk, period="6mo", interval="1d", progress=False, auto_adjust=True)
-        if df is None or df.empty: continue
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.columns = [c.lower() for c in df.columns]
-        df = df.dropna()
-        if len(df) < 60: continue
-        r = analyze(tk, "1d")
-        if r and "error" not in r: out.append(r)
-    out.sort(key=lambda x: x.get("conf",0), reverse=True)
-    return jsonify({"data": out, "ts": wib_now().strftime("%H:%M:%S WIB")})
-
-@app.route("/api/analyze_eod")
-def api_analyze_eod():
-    from flask import request as req
-    t  = req.args.get("t","BBCA").strip().upper()
-    tk = t if t.endswith(".JK") else t+".JK"
-    r  = analyze(tk, "1d")
-    if not r: return jsonify({"error": "Data tidak tersedia"})
-    return jsonify(r)
-
 @app.route("/")
 def index():
     return render_template_string(HTML_APP)
 
 # ── HTML Frontend ────────────────────────────────────────
+
+
+WATCHLIST_DEFAULT = [
+    "BBCA","BBRI","BMRI","BBNI","TLKM","GOTO","UNVR",
+    "ADRO","PTBA","ANTM","INDF","ICBP","BRIS","ASII","SMGR"
+]
+
+@app.route("/api/sesi")
+def api_sesi():
+    n=wib_now(); m=n.hour*60+n.minute
+    if   9*60<=m<=11*60+30:  st,col="SESI 1 AKTIF","#00ff88"
+    elif 13*60+30<=m<=15*60+50: st,col="SESI 2 AKTIF","#00ff88"
+    elif 11*60+30<m<13*60+30: st,col="ISTIRAHAT SIANG","#ffd000"
+    else: st,col="BURSA TUTUP","#ff3d5a"
+    return jsonify({"label":st,"color":col,
+                    "time":n.strftime("%H:%M:%S WIB"),
+                    "date":n.strftime("%d %b %Y")})
+
+@app.route("/api/scalp")
+def api_scalp():
+    tickers = request.args.get("t","BNBR,BBCA,TLKM").split(",")
+    iv      = request.args.get("iv","5m")
+    out=[]
+    for t in tickers[:5]:
+        tk=t.strip().upper()
+        if not tk.endswith(".JK"): tk+=".JK"
+        r=analyze(tk, iv)
+        if r and "error" not in r: out.append(r)
+    return jsonify({"data":out,"ts":wib_now().strftime("%H:%M:%S WIB")})
+
+@app.route("/api/analyze_eod")
+def api_analyze_eod():
+    t  = request.args.get("t","BBCA").strip().upper()
+    tk = t if t.endswith(".JK") else t+".JK"
+    r  = analyze(tk, "1d")
+    if not r or "error" in r:
+        return jsonify({"error":"Data tidak tersedia"})
+    return jsonify(r)
+
+@app.route("/api/screen")
+def api_screen():
+    tickers = WATCHLIST_DEFAULT
+    out=[]
+    for tk_code in tickers:
+        tk = tk_code+".JK"
+        r  = analyze(tk,"1d")
+        if r and "error" not in r: out.append(r)
+    out.sort(key=lambda x: x.get("conf",0), reverse=True)
+    return jsonify({"data":out,"ts":wib_now().strftime("%H:%M:%S WIB")})
+
+@app.route("/api/health")
+def health():
+    return jsonify({
+        "status":"ok",
+        "time_utc":datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+        "time_wib":wib_now().strftime("%H:%M:%S WIB")
+    })
+
 HTML_APP = """<!DOCTYPE html>
 <html lang="id">
 <head>
@@ -618,6 +644,32 @@ window.onload=()=>startR()
 </html>"""
 
 
+
+@app.route("/api/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "time_wib": wib_now().strftime("%H:%M:%S WIB"),
+        "python": "ok"
+    })
+
+@app.route("/api/test")
+def test_api():
+    """Test endpoint untuk debug"""
+    try:
+        import yfinance as yf
+        df = yf.download("BBCA.JK", period="5d", interval="5m",
+                        progress=False, auto_adjust=True)
+        rows = len(df) if df is not None else 0
+        return jsonify({"status":"ok","rows":rows,"time_wib":wib_now().strftime("%H:%M:%S WIB")})
+    except Exception as e:
+        return jsonify({"status":"error","msg":str(e)})
+
+
+@app.route("/")
+def index():
+    return render_template_string(HTML_APP)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
